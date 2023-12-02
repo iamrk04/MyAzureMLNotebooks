@@ -1,0 +1,86 @@
+$schema: https://azuremlschemas.azureedge.net/latest/pipelineJob.schema.json
+type: pipeline
+
+display_name: <model_name>__manual_data
+experiment_name: llm_perf
+
+settings:
+  continue_on_step_failure: true
+  force_rerun: false
+  default_compute: azureml:serverless
+
+inputs:
+  endpoint_url: <url>
+  deployment_name: <name>
+  connections_name: <name>
+  mini_batch_size: "100MB"
+  input_data:
+    type: uri_file
+    path: C:\`Dev\Repos\GitHub\MyAzureMLNotebooks\v2\data\perf_data.jsonl
+
+jobs:
+  batch_prepare_input:
+    type: command
+    component: azureml://registries/azureml/components/batch_inference_preparer/versions/0.0.2
+    inputs:
+      input_dataset:
+        type: uri_folder
+        path: ${{parent.inputs.input_data}}
+      endpoint_url: ${{parent.inputs.endpoint_url}}
+      batch_input_pattern: 
+        '
+        {
+          "input_data": {
+            "input_string": [
+              "###<prompt>"
+            ],
+            "parameters": {
+              "top_p": 0.5,
+              "temperature": 0.001,
+              "do_sample": true,
+              "return_full_text": false,
+              "max_new_tokens": 50
+            }
+          }
+        }
+        '
+    outputs:
+      formatted_data:
+        type: mltable
+  batch_score:
+    type: parallel
+    component: azureml://registries/azureml/components/batch_benchmark_score/versions/0.0.2
+    inputs:
+      online_endpoint_url: ${{parent.inputs.endpoint_url}}
+      deployment_name: ${{parent.inputs.deployment_name}}
+      connections_name: ${{parent.inputs.connections_name}}
+      initial_worker_count: 1
+      max_worker_count: 1
+      data_input_table:
+        type: mltable
+        path: ${{parent.jobs.batch_prepare_input.outputs.formatted_data}}
+    outputs:
+      job_out_path:
+        type: uri_file
+        path: azureml://datastores/${{default_datastore}}/paths/azureml/${{name}}/${{output_name}}.jsonl
+      mini_batch_results_out_directory:
+        type: uri_folder
+      metrics_out_directory:
+        type: uri_folder
+    resources:
+      instance_count: 1
+    max_concurrency_per_instance: 1
+    mini_batch_size: "100MB"
+    retry_settings:
+      timeout: 6000
+      max_retries: 10
+  perf_post_process:
+    type: command
+    component: azureml://registries/azureml-preview-test1/components/batch_score_perf_metrics_computer/labels/latest
+    inputs:
+      endpoint_results:
+        type: uri_folder
+        path: ${{parent.jobs.batch_score.outputs.mini_batch_results_out_directory}}
+    outputs:
+      aggregate_out_data:
+        type: uri_folder
